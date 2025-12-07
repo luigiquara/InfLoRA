@@ -12,7 +12,7 @@ from sklearn.cluster import KMeans
 from methods.base import BaseLearner
 from utils.toolkit import tensor2numpy, accuracy
 from models.sinet_dual import SiNet
-import ipdb
+#import ipdb
 from utils.schedulers import CosineSchedule
 
 class SPrompts_dual(BaseLearner):

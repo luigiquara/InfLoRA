@@ -1,7 +1,7 @@
 import json
 import argparse
 from trainer import train
-import ipdb
+#import ipdb
 
 def main():
     args = setup_parser().parse_args()
@@ -9,6 +9,7 @@ def main():
     args = vars(args)  # Converting argparse Namespace to a dict.
     args.update(param)  # Add parameters from json
     train(args)
+    print(f'Seed: {args["seed"]}')
 
 
 def load_json(settings_path):

@@ -3,7 +3,7 @@ import numpy as np
 from torchvision import datasets, transforms
 from utils.toolkit import split_images_labels
 from utils.datautils.core50data import CORE50
-import ipdb
+#import ipdb
 import yaml
 from PIL import Image
 from shutil import move, rmtree
@@ -274,6 +274,107 @@ class iIMAGENET_A(iData):
         self.train_data, self.train_targets = split_images_labels(train_dset.imgs)
         self.test_data, self.test_targets = split_images_labels(test_dset.imgs)
 
+
+class iTinyImageNet:
+    def __init__(self, root="./data", download=True):
+        self.root = os.path.join(root, "tiny-imagenet-200")
+        self.download = download
+        self.use_path = False
+        self.class_order = list(range(200))  # 200 classes
+
+        self.train_trsf = [
+             transforms.Resize((224, 224)),
+
+
+            transforms.RandomHorizontalFlip(),
+        ]
+        self.test_trsf = [
+            transforms.Resize((224, 224)),
+        ]
+        self.common_trsf = [
+            transforms.ToTensor(),
+            transforms.Normalize((0.4802, 0.4481, 0.3975), (0.2770, 0.2691, 0.2821)),
+        ]
+
+        if download:
+            self.download_data()
+
+        self.train_data, self.train_targets = self.load_split("train")
+        self.test_data, self.test_targets = self.load_split("val")
+
+    def download_data(self):
+        if os.path.exists(self.root):
+            return
+        url = "http://cs231n.stanford.edu/tiny-imagenet-200.zip"
+        download_and_extract_archive(url, download_root="./data")
+
+    def load_split(self, split):
+        data = []
+        targets = []
+        class_to_idx = self.get_class_to_idx()
+
+        if split == "train":
+            train_root = os.path.join(self.root, "train")
+            for class_name in os.listdir(train_root):
+                class_dir = os.path.join(train_root, class_name, "images")
+                if not os.path.isdir(class_dir): continue
+                for fname in os.listdir(class_dir):
+                    path = os.path.join(class_dir, fname)
+                    img = Image.open(path).convert("RGB")
+                    data.append(np.array(img))
+                    targets.append(class_to_idx[class_name])
+        elif split == "val":
+            val_dir = os.path.join(self.root, "val", "images")
+            with open(os.path.join(self.root, "val", "val_annotations.txt")) as f:
+                val_annotations = [line.strip().split() for line in f.readlines()]
+                fname_to_class = {x[0]: x[1] for x in val_annotations}
+            for fname in os.listdir(val_dir):
+                path = os.path.join(val_dir, fname)
+                img = Image.open(path).convert("RGB")
+                data.append(np.array(img))
+                targets.append(class_to_idx[fname_to_class[fname]])
+        else:
+            raise ValueError("Invalid split name")
+
+        return np.array(data), np.array(targets)
+
+    def get_class_to_idx(self):
+        wnids_path = os.path.join(self.root, "wnids.txt")
+        with open(wnids_path, "r") as f:
+            classes = [line.strip() for line in f.readlines()]
+        return {cls_name: idx for idx, cls_name in enumerate(classes)}
+
+'''
+class iTiny_ImageNet(iData):
+    use_path = True
+    train_trsf=[
+            transforms.Resize((224, 224)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            ]
+    test_trsf=[
+        transforms.Resize((224, 224)),
+        #transforms.CenterCrop(224),
+        ]
+    common_trsf = [transforms.ToTensor()]
+
+    class_order = np.arange(200).tolist()
+
+    def __init__(self, args):
+        self.args = args
+        class_order = np.arange(200).tolist()
+        self.class_order = class_order
+
+    def download_data(self):
+        # assert 0, "You should specify the folder of your dataset"
+        train_dir = "data/tiny-imagenet-200/train/"
+        test_dir = "data/tiny-imagenet-200/test/"
+
+        train_dset = datasets.ImageFolder(train_dir)
+        test_dset = datasets.ImageFolder(test_dir)
+
+        self.train_data, self.train_targets = split_images_labels(train_dset.imgs)
+        self.test_data, self.test_targets = split_images_labels(test_dset.imgs)
+'''
 
 class iDomainNet(iData):
 

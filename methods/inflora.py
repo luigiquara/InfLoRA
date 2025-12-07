@@ -15,8 +15,9 @@ from models.sinet_inflora import SiNet
 from models.vit_inflora import Attention_LoRA
 from copy import deepcopy
 from utils.schedulers import CosineSchedule
-import ipdb
+#import ipdb
 import math
+from utils.performance_monitor import PerformanceMonitor
 
 class InfLoRA(BaseLearner):
 
@@ -58,10 +59,20 @@ class InfLoRA(BaseLearner):
         self.feature_list = []
         self.project_type = []
 
+        self.performance_monitor = PerformanceMonitor(device = self._device, log_file=f'performance_log.json')
+
     def after_task(self):
         # self._old_network = self._network.copy().freeze()
         self._known_classes = self._total_classes
         logging.info('Exemplar size: {}'.format(self.exemplar_size))
+
+        # Save performance metrics after each task
+        self.performance_monitor.save_metrics(
+            f"task_{self._cur_task}_performance.json"
+        )
+        # Print performance summary
+        print(f"\n=== Task {self._cur_task} Performance Summary ===")
+        self.performance_monitor.print_stats()
 
     def incremental_train(self, data_manager):
 
@@ -106,6 +117,7 @@ class InfLoRA(BaseLearner):
                     param.requires_grad_(True)
                 if "lora_B_v" + "." + str(self._network.numtask - 1) in name:
                     param.requires_grad_(True)
+        print(f'Number of parameters before training: {sum(p.numel() for p in self._network.parameters() if p.requires_grad)}')
 
         # Double check
         enabled = set()
@@ -210,37 +222,38 @@ class InfLoRA(BaseLearner):
 
     def train_function(self, train_loader, test_loader, optimizer, scheduler):
         prog_bar = tqdm(range(self.run_epoch))
-        for _, epoch in enumerate(prog_bar):
-            self._network.eval()
-            losses = 0.
-            correct, total = 0, 0
-            for i, (_, inputs, targets) in enumerate(train_loader):
+        with self.performance_monitor.monitor_training():
+            for _, epoch in enumerate(prog_bar):
+                self._network.eval()
+                losses = 0.
+                correct, total = 0, 0
+                for i, (_, inputs, targets) in enumerate(train_loader):
 
-                inputs, targets = inputs.to(self._device), targets.to(self._device)
-                mask = (targets >= self._known_classes).nonzero().view(-1)
-                inputs = torch.index_select(inputs, 0, mask)
-                targets = torch.index_select(targets, 0, mask)-self._known_classes
+                    inputs, targets = inputs.to(self._device), targets.to(self._device)
+                    mask = (targets >= self._known_classes).nonzero().view(-1)
+                    inputs = torch.index_select(inputs, 0, mask)
+                    targets = torch.index_select(targets, 0, mask)-self._known_classes
 
-                logits = self._network(inputs)['logits']
-                loss = F.cross_entropy(logits, targets)
+                    logits = self._network(inputs)['logits']
+                    loss = F.cross_entropy(logits, targets)
 
-                optimizer.zero_grad()
-                loss.backward()
+                    optimizer.zero_grad()
+                    loss.backward()
 
-                optimizer.step()
-                losses += loss.item()
+                    optimizer.step()
+                    losses += loss.item()
 
-                _, preds = torch.max(logits, dim=1)
-                correct += preds.eq(targets.expand_as(preds)).cpu().sum()
-                total += len(targets)
-                if self.debug and i > 10: break
+                    _, preds = torch.max(logits, dim=1)
+                    correct += preds.eq(targets.expand_as(preds)).cpu().sum()
+                    total += len(targets)
+                    if self.debug and i > 10: break
 
-            scheduler.step()
-            train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
+                scheduler.step()
+                train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
-            info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}'.format(
-                self._cur_task, epoch + 1, self.run_epoch, losses / len(train_loader), train_acc)
-            prog_bar.set_description(info)
+                info = 'Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}'.format(
+                    self._cur_task, epoch + 1, self.run_epoch, losses / len(train_loader), train_acc)
+                prog_bar.set_description(info)
 
         logging.info(info)
 
@@ -271,52 +284,54 @@ class InfLoRA(BaseLearner):
         return ret
 
     def _eval_cnn(self, loader):
-        self._network.eval()
-        y_pred, y_true = [], []
-        y_pred_with_task = []
-        y_pred_task, y_true_task = [], []
-        for _, (_, inputs, targets) in enumerate(loader):
-            inputs = inputs.to(self._device)
-            targets = targets.to(self._device)
+        with self.performance_monitor.monitor_inference():
+            self._network.eval()
+            y_pred, y_true = [], []
+            y_pred_with_task = []
+            y_pred_task, y_true_task = [], []
+            for _, (_, inputs, targets) in enumerate(loader):
+                inputs = inputs.to(self._device)
+                targets = targets.to(self._device)
 
-            with torch.no_grad():
-                y_true_task.append((targets//self.class_num).cpu())
+                with torch.no_grad():
+                    y_true_task.append((targets//self.class_num).cpu())
 
-                if isinstance(self._network, nn.DataParallel):
-                    outputs = self._network.module.interface(inputs)
-                else:
-                    outputs = self._network.interface(inputs)
+                    if isinstance(self._network, nn.DataParallel):
+                        outputs = self._network.module.interface(inputs)
+                    else:
+                        outputs = self._network.interface(inputs)
 
-            predicts = torch.topk(outputs, k=self.topk, dim=1, largest=True, sorted=True)[1].view(-1)  # [bs, topk]
-            y_pred_task.append((predicts//self.class_num).cpu())
+                predicts = torch.topk(outputs, k=self.topk, dim=1, largest=True, sorted=True)[1].view(-1)  # [bs, topk]
+                y_pred_task.append((predicts//self.class_num).cpu())
 
-            outputs_with_task = torch.zeros_like(outputs)[:,:self.class_num]
-            for idx, i in enumerate(targets//self.class_num):
-                en, be = self.class_num*i, self.class_num*(i+1)
-                outputs_with_task[idx] = outputs[idx, en:be]
-            predicts_with_task = outputs_with_task.argmax(dim=1)
-            predicts_with_task = predicts_with_task + (targets//self.class_num)*self.class_num
+                outputs_with_task = torch.zeros_like(outputs)[:,:self.class_num]
+                for idx, i in enumerate(targets//self.class_num):
+                    en, be = self.class_num*i, self.class_num*(i+1)
+                    outputs_with_task[idx] = outputs[idx, en:be]
+                predicts_with_task = outputs_with_task.argmax(dim=1)
+                predicts_with_task = predicts_with_task + (targets//self.class_num)*self.class_num
 
-            # print(predicts.shape)
-            y_pred.append(predicts.cpu().numpy())
-            y_pred_with_task.append(predicts_with_task.cpu().numpy())
-            y_true.append(targets.cpu().numpy())
+                # print(predicts.shape)
+                y_pred.append(predicts.cpu().numpy())
+                y_pred_with_task.append(predicts_with_task.cpu().numpy())
+                y_true.append(targets.cpu().numpy())
 
-        return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(y_pred_task), torch.cat(y_true_task)  # [N, topk]
+            return np.concatenate(y_pred), np.concatenate(y_pred_with_task), np.concatenate(y_true), torch.cat(y_pred_task), torch.cat(y_true_task)  # [N, topk]
 
     def _compute_accuracy_domain(self, model, loader):
-        model.eval()
-        correct, total = 0, 0
-        for i, (_, inputs, targets) in enumerate(loader):
-            inputs = inputs.to(self._device)
-            with torch.no_grad():
-                outputs = model(inputs)['logits']
+        with self.performance_monitor.monitor_inference():
+            model.eval()
+            correct, total = 0, 0
+            for i, (_, inputs, targets) in enumerate(loader):
+                inputs = inputs.to(self._device)
+                with torch.no_grad():
+                    outputs = model(inputs)['logits']
 
-            predicts = torch.max(outputs, dim=1)[1]
-            correct += ((predicts % self.class_num).cpu() == (targets % self.class_num)).sum()
-            total += len(targets)
+                predicts = torch.max(outputs, dim=1)[1]
+                correct += ((predicts % self.class_num).cpu() == (targets % self.class_num)).sum()
+                total += len(targets)
 
-        return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
+            return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
     def update_DualGPM (self, mat_list):
         threshold = (self.lame - self.lamb)*self._cur_task/self.total_sessions + self.lamb
@@ -461,3 +476,26 @@ class InfLoRA(BaseLearner):
         for i in range(len(self.feature_list)):
             logging.info('Layer {} : {}/{}'.format(i+1,self.feature_list[i].shape[1], self.feature_list[i].shape[0]))
         print('-'*40)  
+
+
+    # Add method to get comprehensive performance report
+    def get_performance_report(self):
+        """Generate a comprehensive performance report"""
+        return self.performance_monitor.get_all_stats()
+
+    # Add method to save final performance summary
+    def save_final_performance_summary(self):
+        """Save final performance summary after all tasks"""
+        final_stats = self.get_performance_report()
+
+        # Save to file
+        import json
+        with open(f"final_performance_summary.json", 'w') as f:
+            json.dump(final_stats, f, indent=2)
+
+        # Print comprehensive summary
+        print("\n" + "="*70)
+        print("FINAL PERFORMANCE SUMMARY")
+        print("="*70)
+        self.performance_monitor.print_stats()
+        print("="*70)

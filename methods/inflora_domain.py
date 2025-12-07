@@ -15,7 +15,7 @@ from models.sinet_inflora import SiNet
 from models.vit_inflora import Attention_LoRA
 from copy import deepcopy
 from utils.schedulers import CosineSchedule
-import ipdb
+#import ipdb
 import math
 from torch.distributions.multivariate_normal import MultivariateNormal
 
@@ -167,7 +167,12 @@ class InfLoRA_domain(BaseLearner):
         if len(self._multiple_gpus) > 1:
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
 
-        base_params = self._network.module.image_encoder.parameters()
+        if isinstance(self._network, nn.DataParallel):
+            net = self._network.module
+        else:
+            net = self._network
+
+        base_params = net.image_encoder.parameters()
         base_fc_params = [p for p in self._network.module.classifier_pool.parameters() if p.requires_grad==True]
         base_params = {'params': base_params, 'lr': self.lrate, 'weight_decay': self.weight_decay}
         base_fc_params = {'params': base_fc_params, 'lr': self.fc_lrate, 'weight_decay': self.weight_decay}

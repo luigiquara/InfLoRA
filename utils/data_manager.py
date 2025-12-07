@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
-from utils.data import iCIFAR100, iIMAGENET_R, iIMAGENET_A, iCUB, iDomainNet, iCIFAR10
+from utils.data import iCIFAR100, iIMAGENET_R, iIMAGENET_A, iCUB, iDomainNet, iCIFAR10, iTinyImageNet
 
 
 
@@ -203,6 +203,8 @@ def _get_idata(dataset_name, args=None):
         return iIMAGENET_A(args)
     elif name == 'cub':
         return iCUB(args)
+    elif name == 'tiny_imagenet':
+        return iTinyImageNet()
     else:
         raise NotImplementedError('Unknown dataset {}.'.format(dataset_name))
 

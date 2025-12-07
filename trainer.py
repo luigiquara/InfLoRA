@@ -3,6 +3,7 @@ import os.path
 import sys
 import logging
 import copy
+import numpy as np
 import time
 import torch
 from utils import factory
@@ -15,10 +16,18 @@ def train(args):
     device = copy.deepcopy(args['device'])
     device = device.split(',')
 
+    accs = []
+    forgettings = []
     for seed in seed_list:
         args['seed'] = seed
         args['device'] = device
-        _train(args)
+        acc, forgetting = _train(args)
+        accs.append(acc); forgettings.append(forgetting)
+
+    print('\nFinal results')
+    print(f'Mean and std using {seed_list} as seeds')
+    print(f'Accuracy: {np.mean(accs)} +- {np.std(accs)}')
+    print(f'Forgetting: {np.mean(forgettings)} +- {np.std(forgettings)}')
 
     myseed = 42069  # set a random seed for reproducibility
     torch.backends.cudnn.deterministic = True
@@ -54,7 +63,12 @@ def _train(args):
     args['class_order'] = data_manager._class_order
     model = factory.get_model(args['model_name'], args)
 
+    before_trainable_params = sum(p.numel() for p in model._network.parameters() if p.requires_grad)
+
+
     cnn_curve, cnn_curve_with_task, nme_curve, cnn_curve_task = {'top1': []}, {'top1': []}, {'top1': []}, {'top1': []}
+    cnn_matrix = []
+
     for task in range(data_manager.nb_tasks):
         logging.info('All params: {}'.format(count_parameters(model._network)))
         logging.info('Trainable params: {}'.format(count_parameters(model._network, True)))
@@ -70,6 +84,12 @@ def _train(args):
         model.after_task()
 
         logging.info('CNN: {}'.format(cnn_accy['grouped']))
+
+        cnn_keys = [key for key in cnn_accy["grouped"].keys() if '-' in key]
+        cnn_keys_sorted = sorted(cnn_keys)
+        cnn_values = [cnn_accy["grouped"][key] for key in cnn_keys_sorted]
+        cnn_matrix.append(cnn_values)
+
         cnn_curve['top1'].append(cnn_accy['top1'])
         cnn_curve_with_task['top1'].append(cnn_accy_with_task['top1'])
         cnn_curve_task['top1'].append(cnn_accy_task)
@@ -80,6 +100,22 @@ def _train(args):
         # if task >= 3: break
 
         torch.save(model._network.state_dict(), os.path.join(logfilename, "task_{}.pth".format(int(task))))
+
+    if len(cnn_matrix) > 0:
+        np_acctable = np.zeros([task + 1, task + 1])
+        for idxx, line in enumerate(cnn_matrix):
+            idxy = len(line)
+            np_acctable[idxx, :idxy] = np.array(line)
+        np_acctable = np_acctable.T
+        forgetting = np.mean((np.max(np_acctable, axis=1) - np_acctable[:, task])[:task])
+        print('Accuracy Matrix (CNN):')
+        print(np_acctable)
+        logging.info('Forgetting (CNN): {}'.format(forgetting))
+
+    after_trainable_params = sum(p.numel() for p in model._network.parameters() if p.requires_grad)
+    print(f'Trainable Parameters Count\nBefore training: {before_trainable_params}\nAfter training: {after_trainable_params}')
+
+    return cnn_accy['grouped']['total'], forgetting
 
 def _set_device(args):
     device_type = args['device']

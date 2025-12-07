@@ -25,7 +25,7 @@ import os
 import logging
 from hashlib import md5
 from PIL import Image
-import ipdb
+#import ipdb
 
 
 class CORE50(object):
