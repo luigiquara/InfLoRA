@@ -157,11 +157,19 @@ class InfLoRA(BaseLearner):
                 for module in self._network.modules():
                     if isinstance(module, Attention_LoRA):
                         cur_matrix = module.cur_matrix
+                        if isinstance(cur_matrix, np.ndarray):
+                            cur_matrix = torch.from_numpy(cur_matrix).float()
+                        elif isinstance(cur_matrix, torch.Tensor):
+                            cur_matrix = cur_matrix.float()
+                        else:
+                            raise TypeError(f"Unsupported cur_matrix type: {type(cur_matrix)}")
+                        cur_matrix = cur_matrix.to(self._device)
+                        proj = self.feature_mat[kk].to(self._device).float()
                         if self.project_type[kk] == 'remove':
-                            cur_matrix = cur_matrix - torch.mm(self.feature_mat[kk],cur_matrix)
+                            cur_matrix = cur_matrix - torch.mm(proj, cur_matrix)
                         else:
                             assert self.project_type[kk] == 'retain'
-                            cur_matrix = torch.mm(self.feature_mat[kk],cur_matrix)
+                            cur_matrix = torch.mm(proj, cur_matrix)
                         cU, cS, cV = torch.linalg.svd(cur_matrix, full_matrices=False)
                         module.lora_A_k[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
                         module.lora_A_v[self._cur_task].weight.data.copy_(cU[:,:module.rank].T/math.sqrt(3))
@@ -213,8 +221,15 @@ class InfLoRA(BaseLearner):
 
             # Projection Matrix Precomputation
             self.feature_mat = []
-            for p in range(len(self.feature_list)):
-                Uf=torch.Tensor(np.dot(self.feature_list[p],self.feature_list[p].transpose()))
+            for p, feat in enumerate(self.feature_list):
+                if isinstance(feat, np.ndarray):
+                    Uf_np = feat @ feat.T
+                    Uf = torch.from_numpy(Uf_np).float().to(self._device)
+                elif isinstance(feat, torch.Tensor):
+                    feat = feat.to(self._device).float()
+                    Uf = feat @ feat.t()
+                else:
+                    raise TypeError(f"Unsupported feature type in feature_list[{p}]: {type(feat)}")
                 print('Layer {} - Projection Matrix shape: {}'.format(p+1,Uf.shape))
                 self.feature_mat.append(Uf)
 
@@ -333,13 +348,15 @@ class InfLoRA(BaseLearner):
 
             return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
-    def update_DualGPM (self, mat_list):
+    def update_DualGPM(self, mat_list):
         threshold = (self.lame - self.lamb)*self._cur_task/self.total_sessions + self.lamb
         print ('Threshold: ', threshold) 
         if len(self.feature_list) == 0:
             # After First Task 
             for i in range(len(mat_list)):
                 activation = mat_list[i]
+                if isinstance(activation, torch.Tensor):
+                    activation = activation.detach().cpu().numpy()
                 U,S,Vh = np.linalg.svd(activation, full_matrices=False)
                 # criteria (Eq-5)
                 sval_total = (S**2).sum()
@@ -353,18 +370,24 @@ class InfLoRA(BaseLearner):
                     self.project_type.append('retain')
         else:
             for i in range(len(mat_list)):
+                activation = mat_list[i]
+                if isinstance(activation, torch.Tensor):
+                    activation = activation.detach().cpu().numpy()
+                if isinstance(self.feature_list[i], torch.Tensor):
+                    self.feature_list[i] = self.feature_list[i].detach().cpu().numpy()
+                P = self.feature_list[i]
                 if self.project_type[i] == 'remove':
-                    activation = mat_list[i]
                     U1,S1,Vh1=np.linalg.svd(activation, full_matrices=False)
                     sval_total = (S1**2).sum()
                     # Projected Representation (Eq-8)
-                    act_hat = activation - np.dot(np.dot(self.feature_list[i],self.feature_list[i].transpose()),activation)
+                    proj = P @ P.T
+                    act_hat = activation - proj @ activation
                     U,S,Vh = np.linalg.svd(act_hat, full_matrices=False)
                     # criteria (Eq-9)
                     sval_hat = (S**2).sum()
                     sval_ratio = (S**2)/sval_total               
                     accumulated_sval = (sval_total-sval_hat)/sval_total
-            
+
                     r = 0
                     for ii in range (sval_ratio.shape[0]):
                         if accumulated_sval < threshold:
@@ -376,18 +399,18 @@ class InfLoRA(BaseLearner):
                         print ('Skip Updating DualGPM for layer: {}'.format(i+1)) 
                         continue
                     # update GPM
-                    Ui=np.hstack((self.feature_list[i],U[:,0:r]))  
+                    Ui=np.hstack((P, U[:,0:r]))  
                     if Ui.shape[1] > Ui.shape[0] :
                         self.feature_list[i]=Ui[:,0:Ui.shape[0]]
                     else:
                         self.feature_list[i]=Ui
                 else:
                     assert self.project_type[i] == 'retain'
-                    activation = mat_list[i]
                     U1,S1,Vh1=np.linalg.svd(activation, full_matrices=False)
                     sval_total = (S1**2).sum()
                     # Projected Representation (Eq-8)
-                    act_hat = np.dot(np.dot(self.feature_list[i],self.feature_list[i].transpose()),activation)
+                    proj = P @ P.T
+                    act_hat = proj @ activation
                     U,S,Vh = np.linalg.svd(act_hat, full_matrices=False)
                     # criteria (Eq-9)
                     sval_hat = (S**2).sum()
@@ -406,9 +429,9 @@ class InfLoRA(BaseLearner):
                         continue
 
                     # update GPM by Projected Representation (Eq-8)
-                    act_feature = self.feature_list[i] - np.dot(np.dot(U[:,0:r],U[:,0:r].transpose()),self.feature_list[i])
-                    Ui, Si, Vi = np.linalg.svd(act_feature)
-                    self.feature_list[i]=Ui[:,:self.feature_list[i].shape[1]-r]
+                    act_feature = P - (U[:,0:r] @ U[:,0:r].T @ P)
+                    Ui, Si, Vi = np.linalg.svd(act_feature, full_matrices=False)
+                    self.feature_list[i]=Ui[:, :P.shape[1]-r]
 
         print('-'*40)
         print('Gradient Constraints Summary')
@@ -416,8 +439,7 @@ class InfLoRA(BaseLearner):
         for i in range(len(self.feature_list)):
             if self.project_type[i]=='remove' and (self.feature_list[i].shape[1] > (self.feature_list[i].shape[0]/2)):
                 feature = self.feature_list[i]
-                # ipdb.set_trace()
-                U, S, V = np.linalg.svd(feature)
+                U, S, V = np.linalg.svd(feature, full_matrices=False)
                 new_feature = U[:,feature.shape[1]:]
                 self.feature_list[i] = new_feature
                 self.project_type[i] = 'retain'
